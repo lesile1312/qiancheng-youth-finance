@@ -40,7 +40,7 @@ function OceanWaves({ reducedMotion }) {
   )
 }
 
-export default function WealthHero({ projection, values, reducedMotion: motionPreference }) {
+export default function WealthHero({ projection, values, scenarioLabel, demand, reducedMotion: motionPreference }) {
   const [motionPaused, setMotionPaused] = useState(false)
   const reducedMotion = motionPreference || motionPaused
   const ref = useRef(null)
@@ -50,13 +50,17 @@ export default function WealthHero({ projection, values, reducedMotion: motionPr
   const depth = useTransform(scrollYProgress, [0, 1], [0, 90])
   const foreground = useTransform(scrollYProgress, [0, 1], [0, -45])
   const points = projection.points
-  const max = Math.max(projection.high * 1.1, 1)
+  const domainMin = Math.min(0, ...points.map(point => point.low)) * 1.08
+  const max = Math.max(...points.map(point => point.high), 1) * 1.1
+  const range = max - domainMin
+  const zeroY = 65 + (max / range) * 285
   const x = i => 65 + i / (points.length - 1) * 1070
-  const y = value => 350 - value / max * 285
+  const y = value => 65 + ((max - value) / range) * 285
   const path = key => points.map((point, i) => `${i ? 'L' : 'M'} ${x(i).toFixed(1)} ${y(point[key]).toFixed(1)}`).join(' ')
   const line = path('base')
   const band = `${path('high')} ${[...points].reverse().map((point, reverseIndex) => `L ${x(points.length - 1 - reverseIndex).toFixed(1)} ${y(point.low).toFixed(1)}`).join(' ')} Z`
-  const area = `${line} L 1135 350 L 65 350 Z`
+  const area = `${line} L 1135 ${zeroY} L 65 ${zeroY} Z`
+  const gridValues = Array.from({ length: 5 }, (_, index) => max - range * index / 4)
   const totalMonths = values.years * 12
   const stages = [
     { title: '在校起点', month: 0 },
@@ -66,7 +70,8 @@ export default function WealthHero({ projection, values, reducedMotion: motionPr
   ].map(stage => ({ ...stage, index: Math.round(stage.month / totalMonths * (points.length - 1)) }))
   const selectedIndex = hover ?? points.length - 1
   const selected = points[selectedIndex]
-  const revision = `${values.principal}-${values.monthly}-${values.years}-${values.annualRate}`
+  const revision = `${values.principal}-${values.monthly}-${values.years}-${values.annualRate}-${scenarioLabel}-${demand?.enabled ? `${demand.amount}-${demand.month}` : 'no-need'}`
+  const needIndex = demand?.enabled && demand.month <= totalMonths ? demand.month : null
 
   function track(event) {
     const rect = svgRef.current?.getBoundingClientRect()
@@ -88,16 +93,17 @@ export default function WealthHero({ projection, values, reducedMotion: motionPr
             <p className="mt-3 text-sm leading-6 text-[#a7c7c5]">从校园出发，让时间描绘你的财富轨迹。</p>
           </div>
           <div className="border-l border-[#9ce3dc]/30 pl-5">
-            <p className="text-xs text-[#a6c3c0]">{hover === null ? `${values.years} 年后 · 基准情景` : `${(selected.month / 12).toFixed(selected.month % 12 ? 1 : 0)} 年后 · 基准情景`}</p>
+            <p className="text-xs text-[#a6c3c0]">{hover === null ? `${values.years} 年后 · ${scenarioLabel}` : `${(selected.month / 12).toFixed(selected.month % 12 ? 1 : 0)} 年后 · ${scenarioLabel}`}</p>
             <motion.p key={Math.round(selected.base)} initial={reducedMotion ? false : { opacity: .5, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .24 }} className="mt-1 font-display text-3xl tabular-nums tracking-[-.05em] text-[#edfffa] sm:text-4xl"><span className="mr-2 text-sm text-[#a6c3c0]">¥</span>{money(selected.base)}</motion.p>
             <p className="mt-2 text-xs text-[#91b2b2]">年化假设 {values.annualRate.toFixed(1)}% · 非收益承诺</p>
           </div>
         </div>
         <div className="relative mt-7 flex min-h-[250px] flex-1 flex-col justify-end sm:mt-9">
-          <div className="mb-2 flex flex-wrap items-center gap-x-5 gap-y-2 text-[11px] text-[#a7c6c4]"><span className="flex items-center gap-2"><i className="h-[2px] w-6 bg-[#9ef3e6]" />基准路径</span><span className="flex items-center gap-2"><i className="h-2 w-6 bg-[#8bded7]/20" />敏感性区间</span><span className="ml-auto hidden sm:block">悬停或用方向键探索</span><button type="button" onClick={() => setMotionPaused(paused => !paused)} aria-pressed={motionPaused} className="rounded-full border border-white/20 px-3 py-2 text-[#d7eeeb] transition-colors hover:bg-white/10">{motionPaused ? "播放海浪" : "暂停海浪"}</button></div>
+          <div className="mb-2 flex flex-wrap items-center gap-x-5 gap-y-2 text-[11px] text-[#a7c6c4]"><span className="flex items-center gap-2"><i className="h-[2px] w-6 bg-[#9ef3e6]" />{scenarioLabel}</span><span className="flex items-center gap-2"><i className="h-2 w-6 bg-[#8bded7]/20" />敏感性区间</span>{needIndex !== null && <span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#e8b68f]" />{demand.label} ¥{money(demand.amount)}</span>}<span className="ml-auto hidden sm:block">悬停或用方向键探索</span><button type="button" onClick={() => setMotionPaused(paused => !paused)} aria-pressed={motionPaused} className="rounded-full border border-white/20 px-3 py-2 text-[#d7eeeb] transition-colors hover:bg-white/10">{motionPaused ? "播放海浪" : "暂停海浪"}</button></div>
           <svg ref={svgRef} onPointerMove={track} onPointerLeave={() => setHover(null)} viewBox="0 0 1200 390" preserveAspectRatio="none" role="slider" tabIndex={0} aria-label="探索财富曲线时点" aria-valuemin={0} aria-valuemax={totalMonths} aria-valuenow={selected.month} aria-valuetext={`${selected.month}个月，基准资产${money(selected.base)}元`} onKeyDown={event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); setHover(event.key === "Home" ? 0 : event.key === "End" ? points.length - 1 : Math.max(0, Math.min(points.length - 1, selectedIndex + (event.key === "ArrowRight" ? 1 : -1)))) }} className="block h-[250px] w-full touch-pan-y sm:h-[320px] lg:h-[min(44vh,440px)]">
             <defs><linearGradient id="heroLine" x1="0" y1="0" x2="1" y2="0"><stop stopColor="#85bfff"/><stop offset=".55" stopColor="#7ae1dc"/><stop offset="1" stopColor="#e0fff0"/></linearGradient><linearGradient id="heroWater" x1="0" y1="0" x2="0" y2="1"><stop stopColor="#66e0d8" stopOpacity=".24"/><stop offset="1" stopColor="#2e9ba8" stopOpacity="0"/></linearGradient><filter id="heroGlow"><feGaussianBlur stdDeviation="7"/></filter></defs>
-            {[0,1,2,3,4].map(i => <g key={i}><line x1="65" x2="1135" y1={350-i*71.25} y2={350-i*71.25} stroke="#b1e6e0" strokeOpacity=".11" strokeDasharray="3 9"/><text x="0" y={354-i*71.25} fill="#92b2b0" fontSize="12">{i === 0 ? '0' : `${(max*i/4/10000).toFixed(1)}万`}</text></g>)}
+            {gridValues.map((value, i) => <g key={i}><line x1="65" x2="1135" y1={y(value)} y2={y(value)} stroke="#b1e6e0" strokeOpacity={Math.abs(value) < range * .005 ? '.24' : '.11'} strokeDasharray={Math.abs(value) < range * .005 ? '0' : '3 9'}/><text x="0" y={y(value)+4} fill="#92b2b0" fontSize="12">{Math.abs(value) < range * .005 ? '0' : `${(value/10000).toFixed(1)}万`}</text></g>)}
+            <line x1="65" x2="1135" y1={zeroY} y2={zeroY} stroke="#d5e6e2" strokeOpacity=".2" />
             <motion.path key={`band-${revision}`} d={band} fill="#88e1db" initial={reducedMotion ? false : {opacity:0}} animate={{opacity:.12}} transition={{duration:1.2}} />
             <motion.path key={`area-${revision}`} d={area} fill="url(#heroWater)" initial={reducedMotion ? false : {opacity:0}} animate={{opacity:1}} transition={{duration:1.4}} />
             <path d={path('low')} fill="none" stroke="#9de2de" strokeOpacity=".32" strokeWidth="1.2" strokeDasharray="5 8"/><path d={path('high')} fill="none" stroke="#9de2de" strokeOpacity=".32" strokeWidth="1.2" strokeDasharray="5 8"/>
@@ -105,6 +111,7 @@ export default function WealthHero({ projection, values, reducedMotion: motionPr
             <motion.path key={`line-${revision}`} d={line} fill="none" stroke="url(#heroLine)" strokeWidth="3" strokeLinecap="round" initial={reducedMotion ? false : {pathLength:0}} animate={{pathLength:1}} transition={{duration:1.6,ease:[0.16,1,0.3,1]}} />
             {!reducedMotion && <g key={`traveller-${revision}`}><circle r="9" fill="#9affed" opacity=".3" filter="url(#heroGlow)"><animateMotion path={line} dur="6s" begin="1.6s" repeatCount="indefinite" /></circle><circle r="3" fill="#edfff9"><animateMotion path={line} dur="6s" begin="1.6s" repeatCount="indefinite" /></circle></g>}
             {stages.map((stage, i) => <motion.g key={`${stage.title}-${revision}`} initial={reducedMotion ? false : {opacity:0,scale:.6}} animate={{opacity:1,scale:1}} transition={{delay:reducedMotion ? 0 : .3+i*.25,duration:.4}}><circle cx={x(stage.index)} cy={y(points[stage.index].base)} r="14" fill="#9effec" opacity=".1"/><circle cx={x(stage.index)} cy={y(points[stage.index].base)} r="4" fill="#e0fff9"/></motion.g>)}
+            {needIndex !== null && <g pointerEvents="none"><line x1={x(needIndex)} x2={x(needIndex)} y1="45" y2="350" stroke="#e8b68f" strokeOpacity=".62" strokeDasharray="4 7"/><circle cx={x(needIndex)} cy={y(points[needIndex].base)} r="7" fill="#f4c39a" stroke="#123b3b" strokeWidth="3"/></g>}
             {hover !== null && <g pointerEvents="none"><line x1={x(hover)} x2={x(hover)} y1="45" y2="350" stroke="#d8fff7" strokeOpacity=".4" strokeDasharray="4 7"/><circle cx={x(hover)} cy={y(selected.base)} r="7" fill="#dcfff7" stroke="#123b3b" strokeWidth="3"/></g>}
             <text x="65" y="380" fill="#91b2b2" fontSize="12">现在</text><text x="1135" y="380" fill="#91b2b2" fontSize="12" textAnchor="end">{values.years} 年</text>
           </svg>

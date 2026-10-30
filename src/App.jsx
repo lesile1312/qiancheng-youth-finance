@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import WealthHero from './WealthHero'
+import ScenarioLab from './ScenarioLab'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import {
   ArrowUpRight,
@@ -16,6 +17,19 @@ import {
 
 const INITIAL = { principal: 30000, monthly: 770, years: 10, annualRate: 4, schoolMonths: 18, searchMonths: 3, graduateSupport: 1000, salary: 7500, rent: 1500, living: 2600 }
 const YEAR_OPTIONS = [5, 10, 15, 20]
+const INITIAL_NEED = { preset: 'moving', label: '毕业搬迁', amount: 8000, month: 18, enabled: false }
+const NEED_PRESETS = [
+  { id: 'moving', label: '毕业搬迁', amount: 8000 },
+  { id: 'equipment', label: '学习设备', amount: 6000 },
+  { id: 'emergency', label: '突发支出', amount: 10000 },
+  { id: 'custom', label: '自定义', amount: 5000 },
+]
+const SCENARIO_DEFINITIONS = [
+  { id: 'base', label: '当前规划', adjustment: '按现有输入测算', derive: values => values },
+  { id: 'long-search', label: '求职延长', adjustment: '求职期增加 3 个月', derive: values => ({ ...values, searchMonths: Math.min(60, values.searchMonths + 3) }) },
+  { id: 'higher-cost', label: '生活成本上浮', adjustment: '毕业后房租与生活费 +10%', derive: values => ({ ...values, rent: Math.round(values.rent * 1.1), living: Math.round(values.living * 1.1) }) },
+  { id: 'lower-income', label: '收入低于预期', adjustment: '毕业后月薪 −10%', derive: values => ({ ...values, salary: Math.round(values.salary * 0.9) }) },
+]
 const MONTHS_PER_YEAR = 12
 const HF_RANGE_BYTES = 8 * 1024 * 1024
 const HF_RANGE_IDLE_TIMEOUT_MS = 60_000
@@ -170,28 +184,40 @@ function formatCompact(value) {
   return formatMoney(value)
 }
 
-function makeProjection(values) {
+function monthlyFlow(values, month) {
+  if (month <= values.schoolMonths) return values.monthly
+  if (month <= values.schoolMonths + values.searchMonths) return values.graduateSupport - values.living
+  return values.salary - values.rent - values.living
+}
+
+function rollBalance(balance, annualRate, flow) {
+  const interestBearingBalance = Math.max(0, balance)
+  const uncoveredGap = Math.min(0, balance)
+  return interestBearingBalance * (1 + annualRate / 1200) + uncoveredGap + flow
+}
+
+function makeProjection(values, demand) {
   const months = values.years * MONTHS_PER_YEAR
   const delta = 2.5
   const lowRate = Math.max(-1.5, values.annualRate - delta)
   const highRate = values.annualRate + delta
-  const count = 121
   const balances = { low: values.principal, base: values.principal, high: values.principal }
   let invested = values.principal
-  const points = Array.from({ length: count }, (_, index) => {
-    const month = Math.round((months * index) / (count - 1))
-    if (index > 0) {
-      const previousMonth = Math.round((months * (index - 1)) / (count - 1))
-      for (let m = previousMonth + 1; m <= month; m += 1) {
-        const flow = m <= values.schoolMonths ? values.monthly : m <= values.schoolMonths + values.searchMonths ? values.graduateSupport - values.living : values.salary - values.rent - values.living
-        invested += flow
-        balances.low = balances.low * (1 + lowRate / 1200) + flow
-        balances.base = balances.base * (1 + values.annualRate / 1200) + flow
-        balances.high = balances.high * (1 + highRate / 1200) + flow
-      }
+  const points = [{ month: 0, low: balances.low, base: balances.base, high: balances.high }]
+  for (let month = 1; month <= months; month += 1) {
+    const flow = monthlyFlow(values, month)
+    invested += flow
+    balances.low = rollBalance(balances.low, lowRate, flow)
+    balances.base = rollBalance(balances.base, values.annualRate, flow)
+    balances.high = rollBalance(balances.high, highRate, flow)
+    if (demand?.enabled && month === demand.month) {
+      invested -= demand.amount
+      balances.low -= demand.amount
+      balances.base -= demand.amount
+      balances.high -= demand.amount
     }
-    return { month, low: balances.low, base: balances.base, high: balances.high }
-  })
+    points.push({ month, low: balances.low, base: balances.base, high: balances.high })
+  }
   return {
     points,
     lowRate,
@@ -203,12 +229,12 @@ function makeProjection(values) {
   }
 }
 
-function balanceAtMonth(values, targetMonth) {
+function balanceAtMonth(values, targetMonth, demand) {
   const monthLimit = Math.min(targetMonth, values.years * MONTHS_PER_YEAR)
   let balance = values.principal
   for (let month = 1; month <= monthLimit; month += 1) {
-    const flow = month <= values.schoolMonths ? values.monthly : month <= values.schoolMonths + values.searchMonths ? values.graduateSupport - values.living : values.salary - values.rent - values.living
-    balance = balance * (1 + values.annualRate / 1200) + flow
+    balance = rollBalance(balance, values.annualRate, monthlyFlow(values, month))
+    if (demand?.enabled && month === demand.month) balance -= demand.amount
   }
   return balance
 }
@@ -229,9 +255,12 @@ function chartGeometry(points) {
   const pad = { top: 28, right: 34, bottom: 48, left: 76 }
   const plotW = width - pad.left - pad.right
   const plotH = height - pad.top - pad.bottom
-  const max = Math.max(...points.map((point) => point.high)) * 1.08
+  const min = Math.min(0, ...points.map((point) => point.low))
+  const max = Math.max(1, ...points.map((point) => point.high)) * 1.08
+  const domainMin = min < 0 ? min * 1.08 : 0
+  const range = max - domainMin
   const x = (index) => pad.left + (index / (points.length - 1)) * plotW
-  const y = (value) => pad.top + plotH - (value / max) * plotH
+  const y = (value) => pad.top + ((max - value) / range) * plotH
   const pathFor = (key) => points.map((point, index) => `${index ? 'L' : 'M'} ${x(index).toFixed(1)} ${y(point[key]).toFixed(1)}`).join(' ')
   const upper = points.map((point, index) => `${index ? 'L' : 'M'} ${x(index).toFixed(1)} ${y(point.high).toFixed(1)}`).join(' ')
   const lowerReverse = [...points].reverse().map((point, reverseIndex) => {
@@ -239,10 +268,11 @@ function chartGeometry(points) {
     return `L ${x(index).toFixed(1)} ${y(point.low).toFixed(1)}`
   }).join(' ')
   const area = `${upper} ${lowerReverse} Z`
-  return { width, height, pad, plotW, plotH, max, x, y, pathFor, area }
+  const ticks = Array.from({ length: 5 }, (_, index) => max - (range * index) / 4)
+  return { width, height, pad, plotW, plotH, min: domainMin, max, range, ticks, zeroY: y(0), x, y, pathFor, area }
 }
 
-function AssetChart({ projection, years, reducedMotion, milestones, animationKey }) {
+function AssetChart({ projection, years, reducedMotion, milestones, animationKey, demand }) {
   const [hoverIndex, setHoverIndex] = useState(null)
   const svgRef = useRef(null)
   const geometry = useMemo(() => chartGeometry(projection.points), [projection.points])
@@ -287,16 +317,16 @@ function AssetChart({ projection, years, reducedMotion, milestones, animationKey
           </filter>
         </defs>
 
-        {[0, 1, 2, 3, 4].map((tick) => {
-          const value = (geometry.max / 4) * tick
+        {geometry.ticks.map((value, tick) => {
           const y = geometry.y(value)
           return (
             <g key={tick}>
-              <line x1={geometry.pad.left} x2={geometry.width - geometry.pad.right} y1={y} y2={y} stroke="#93a9b7" strokeOpacity={tick === 0 ? '.2' : '.09'} strokeDasharray={tick === 0 ? '0' : '3 8'} />
+              <line x1={geometry.pad.left} x2={geometry.width - geometry.pad.right} y1={y} y2={y} stroke="#93a9b7" strokeOpacity={Math.abs(value) < geometry.range * .005 ? '.24' : '.09'} strokeDasharray={Math.abs(value) < geometry.range * .005 ? '0' : '3 8'} />
               <text x="0" y={y + 4} fill="#738591" fontSize="13" fontFamily="DM Mono, monospace">{value === 0 ? '0' : formatCompact(value)}</text>
             </g>
           )
         })}
+        <line x1={geometry.pad.left} x2={geometry.width - geometry.pad.right} y1={geometry.zeroY} y2={geometry.zeroY} stroke="#c7d7da" strokeOpacity=".2" />
 
         <motion.path
           key={`range-${animationKey}`}
@@ -306,6 +336,12 @@ function AssetChart({ projection, years, reducedMotion, milestones, animationKey
           animate={{ opacity: 1 }}
           transition={{ duration: reducedMotion ? 0 : 1.1, ease: [0.16, 1, 0.3, 1] }}
         />
+
+        {demand?.enabled && demand.month <= years * MONTHS_PER_YEAR && (() => {
+          const index = demand.month
+          const point = points[index]
+          return <g aria-label={`${demand.label}支出，${demand.month}个月后，${formatMoney(demand.amount)}元`}><line x1={geometry.x(index)} x2={geometry.x(index)} y1={geometry.pad.top} y2={geometry.pad.top + geometry.plotH} stroke="#e8b68f" strokeOpacity=".52" strokeDasharray="4 5"/><circle cx={geometry.x(index)} cy={geometry.y(point.base)} r="7" fill="#e8b68f" fillOpacity=".9" stroke="#10171d" strokeWidth="3"/></g>
+        })()}
         <motion.path key={`low-${animationKey}`} d={geometry.pathFor('low')} fill="none" stroke="#8096a3" strokeOpacity=".32" strokeWidth="1.4" strokeDasharray="4 7" initial={reducedMotion ? false : { opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: reducedMotion ? 0 : 0.45, delay: reducedMotion ? 0 : 0.12 }} />
         <motion.path key={`high-${animationKey}`} d={geometry.pathFor('high')} fill="none" stroke="#8096a3" strokeOpacity=".32" strokeWidth="1.4" strokeDasharray="4 7" initial={reducedMotion ? false : { opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: reducedMotion ? 0 : 0.45, delay: reducedMotion ? 0 : 0.12 }} />
         <motion.path
@@ -390,50 +426,93 @@ function NumericField({ label, suffix, value, onChange, min, max, step = 1, pref
 function App() {
   const reducedMotion = useReducedMotion()
   const [values, setValues] = useState(INITIAL)
+  const [activeScenarioId, setActiveScenarioId] = useState('base')
+  const [demand, setDemand] = useState(INITIAL_NEED)
   const [chartRevision, setChartRevision] = useState(0)
   const [copied, setCopied] = useState(false)
   const [aiBusy, setAiBusy] = useState(false)
   const [aiStatus, setAiStatus] = useState('尚未调用模型')
   const [aiReport, setAiReport] = useState(null)
   const chartRef = useRef(null)
-  const previousChartValues = useRef(values)
-  const projection = useMemo(() => makeProjection(values), [values])
+  const aiInputRevision = useRef(0)
+  const activeScenario = SCENARIO_DEFINITIONS.find(scenario => scenario.id === activeScenarioId) ?? SCENARIO_DEFINITIONS[0]
+  const effectiveValues = useMemo(() => activeScenario.derive(values), [activeScenario, values])
+  const effectiveDemand = useMemo(() => ({ ...demand, month: Math.min(demand.month, effectiveValues.years * MONTHS_PER_YEAR) }), [demand, effectiveValues.years])
+  const projection = useMemo(() => makeProjection(effectiveValues, effectiveDemand), [effectiveValues, effectiveDemand])
+  const scenarioRows = useMemo(() => {
+    const baseProjection = makeProjection(values, effectiveDemand)
+    return SCENARIO_DEFINITIONS.map(scenario => {
+      const scenarioProjection = scenario.id === activeScenarioId ? projection : makeProjection(scenario.derive(values), effectiveDemand)
+      return { ...scenario, endingBalance: scenarioProjection.base, delta: scenarioProjection.base - baseProjection.base }
+    })
+  }, [values, activeScenarioId, projection, effectiveDemand])
+  const needResult = useMemo(() => {
+    const noNeedProjection = makeProjection(effectiveValues, { ...effectiveDemand, enabled: false })
+    const beforeBalance = balanceAtMonth(effectiveValues, effectiveDemand.month)
+    return {
+      beforeBalance,
+      afterBalance: beforeBalance - effectiveDemand.amount,
+      monthlyReserve: effectiveDemand.amount / Math.max(1, effectiveDemand.month),
+      endingImpact: Math.max(0, noNeedProjection.base - makeProjection(effectiveValues, { ...effectiveDemand, enabled: true }).base),
+    }
+  }, [effectiveValues, effectiveDemand])
   const growth = Math.max(0, projection.base - projection.invested)
   const contributionShare = projection.base > 0 ? Math.min(100, (projection.invested / projection.base) * 100) : 0
   const milestones = useMemo(() => {
-    const totalMonths = values.years * MONTHS_PER_YEAR
+    const totalMonths = effectiveValues.years * MONTHS_PER_YEAR
     const transitionMonth = Math.min(24, Math.max(12, Math.round(totalMonths * 0.25)))
     const careerMonth = Math.min(totalMonths, Math.max(transitionMonth + 6, Math.min(48, Math.round(totalMonths * 0.45))))
     return [
       { month: 0, title: '在校起点', detail: '现在' },
       { month: transitionMonth, title: '毕业过渡', detail: `${(transitionMonth / 12).toFixed(1)} 年` },
       { month: careerMonth, title: '职场起步', detail: `${(careerMonth / 12).toFixed(1)} 年` },
-      { month: totalMonths, title: '长期目标', detail: `${values.years} 年` },
+      { month: totalMonths, title: '长期目标', detail: `${effectiveValues.years} 年` },
     ].map((milestone) => ({
       ...milestone,
-      index: Math.round((milestone.month / totalMonths) * (projection.points.length - 1)),
+      index: milestone.month,
     }))
-  }, [values.years, projection.points])
+  }, [effectiveValues.years, projection.points])
+
+  const chartModelKey = JSON.stringify([effectiveValues, effectiveDemand.enabled, effectiveDemand.amount, effectiveDemand.month, activeScenarioId])
+  const previousChartKey = useRef(chartModelKey)
 
   useEffect(() => {
-    if (previousChartValues.current === values) {
+    if (previousChartKey.current === chartModelKey) {
       return undefined
     }
-    previousChartValues.current = values
+    previousChartKey.current = chartModelKey
     const timer = window.setTimeout(() => setChartRevision((revision) => revision + 1), 220)
     return () => window.clearTimeout(timer)
-  }, [values])
+  }, [chartModelKey])
 
-  function update(key, value) {
-    setValues((current) => ({ ...current, [key]: value }))
+  function invalidateReport() {
+    aiInputRevision.current += 1
     if (aiReport) {
       setAiReport(null)
       setAiStatus('模拟参数已变，请重新生成匹配当前数据的报告。')
+    } else if (aiBusy) {
+      setAiStatus('模拟参数已变；当前分析完成后将丢弃旧结果。')
     }
+  }
+
+  function update(key, value) {
+    setValues((current) => ({ ...current, [key]: value }))
+    invalidateReport()
+  }
+
+  function selectScenario(id) {
+    setActiveScenarioId(id)
+    invalidateReport()
+  }
+
+  function updateDemand(patch) {
+    setDemand(current => ({ ...current, ...patch }))
+    invalidateReport()
   }
 
   async function generateAiReport() {
     if (aiBusy) return
+    const revisionAtStart = aiInputRevision.current
     setAiBusy(true)
     setAiReport(null)
     setAiStatus('正在加载开源 Qwen3.5 模型…首次使用需下载模型权重。')
@@ -452,29 +531,34 @@ function App() {
       }
       const { processor, model } = await loadQwenRuntime(progress)
       stage = '生成分析报告'
-      const searchEndMonth = values.schoolMonths + values.searchMonths
-      const endMonth = values.years * MONTHS_PER_YEAR
-      const studentNet = values.monthly
-      const searchNet = values.graduateSupport - values.living
-      const employmentNet = values.salary - values.rent - values.living
-      const horizonStage = endMonth <= values.schoolMonths ? '在校阶段' : endMonth <= searchEndMonth ? '求职过渡阶段' : '就业阶段'
+      const scenarioValues = effectiveValues
+      const searchEndMonth = scenarioValues.schoolMonths + scenarioValues.searchMonths
+      const endMonth = scenarioValues.years * MONTHS_PER_YEAR
+      const studentNet = scenarioValues.monthly
+      const searchNet = scenarioValues.graduateSupport - scenarioValues.living
+      const employmentNet = scenarioValues.salary - scenarioValues.rent - scenarioValues.living
+      const horizonStage = endMonth <= scenarioValues.schoolMonths ? '在校阶段' : endMonth <= searchEndMonth ? '求职过渡阶段' : '就业阶段'
       const milestoneSummary = [
-        values.schoolMonths <= endMonth ? `毕业节点约 ¥${formatMoney(balanceAtMonth(values, values.schoolMonths))}` : null,
-        searchEndMonth <= endMonth ? `入职节点约 ¥${formatMoney(balanceAtMonth(values, searchEndMonth))}` : null,
+        scenarioValues.schoolMonths <= endMonth ? `毕业节点约 ¥${formatMoney(balanceAtMonth(scenarioValues, scenarioValues.schoolMonths, effectiveDemand))}` : null,
+        searchEndMonth <= endMonth ? `入职节点约 ¥${formatMoney(balanceAtMonth(scenarioValues, searchEndMonth, effectiveDemand))}` : null,
       ].filter(Boolean).join('；')
-      const deterministicSummary = `当前时间轴结束于${horizonStage}。在校月净结余 ¥${formatMoney(studentNet)}，求职期月净现金流 ${searchNet < 0 ? '-' : ''}¥${formatMoney(Math.abs(searchNet))}，入职后月净结余 ¥${formatMoney(employmentNet)}。${milestoneSummary ? `${milestoneSummary}；` : ''}${values.years} 年基准情景期末约 ¥${formatMoney(projection.base)}，低/高收益假设对照约 ¥${formatMoney(projection.low)} / ¥${formatMoney(projection.high)}。以上由输入假设计算，不是收益预测。`
+      const needSummary = `${effectiveDemand.label} ¥${formatMoney(effectiveDemand.amount)}，第 ${effectiveDemand.month} 个月发生；发生前约 ¥${formatMoney(needResult.beforeBalance)}，支出后约 ¥${formatMoney(needResult.afterBalance)}${effectiveDemand.enabled ? '，已计入主曲线' : '，主曲线暂未计入'}。`
+      const scenarioSummary = scenarioRows.map(scenario => `${scenario.label} ¥${formatMoney(scenario.endingBalance)}`).join('；')
+      const deterministicSummary = `当前情景为“${activeScenario.label}”（${activeScenario.adjustment}），时间轴结束于${horizonStage}。在校月净结余 ¥${formatMoney(studentNet)}，求职期月净现金流 ${searchNet < 0 ? '-' : ''}¥${formatMoney(Math.abs(searchNet))}，入职后月净结余 ¥${formatMoney(employmentNet)}。${milestoneSummary ? `${milestoneSummary}；` : ''}${needSummary}情景期末对照：${scenarioSummary}。${scenarioValues.years} 年期末约 ¥${formatMoney(projection.base)}，低/高收益假设对照约 ¥${formatMoney(projection.low)} / ¥${formatMoney(projection.high)}。以上由输入假设计算，不是收益预测。`
       const facts = {
-        simulation: '每月先按假设年化收益率折算月收益，再计入当月净现金流。各阶段收入支出均为用户输入情景，不是预测。',
-        timeline: { startingStage: '在校阶段', horizonStage, horizonYears: values.years },
-        assumptions: { startingCash: values.principal, schoolMonths: values.schoolMonths, campusMonthlySurplus: values.monthly, jobSearchMonths: values.searchMonths, jobSearchSupport: values.graduateSupport, monthlyLivingCost: values.living, startingSalary: values.salary, monthlyRent: values.rent, annualReturnAssumptionPercent: values.annualRate, horizonYears: values.years },
+        simulation: '每月仅对非负余额按假设年化收益折算，再计入当月净现金流；负余额按未覆盖缺口记录，不计收益。各阶段现金流均为用户输入情景，不是预测。',
+        selectedScenario: { name: activeScenario.label, adjustment: activeScenario.adjustment },
+        scenarioComparison: scenarioRows.map(scenario => ({ name: scenario.label, adjustment: scenario.adjustment, endingBalance: Math.round(scenario.endingBalance), deltaFromCurrentPlan: Math.round(scenario.delta) })),
+        timeline: { startingStage: '在校阶段', horizonStage, horizonYears: scenarioValues.years },
+        assumptions: { startingCash: scenarioValues.principal, schoolMonths: scenarioValues.schoolMonths, campusMonthlySurplus: scenarioValues.monthly, jobSearchMonths: scenarioValues.searchMonths, jobSearchSupport: scenarioValues.graduateSupport, monthlyLivingCost: scenarioValues.living, startingSalary: scenarioValues.salary, monthlyRent: scenarioValues.rent, annualReturnAssumptionPercent: scenarioValues.annualRate, horizonYears: scenarioValues.years },
         cashflowByPhase: { studentMonthlyNet: studentNet, jobSearchMonthlyNet: searchNet, employmentMonthlyNet: employmentNet },
-        milestones: { graduationBalance: values.schoolMonths <= endMonth ? Math.round(balanceAtMonth(values, values.schoolMonths)) : null, employmentStartBalance: searchEndMonth <= endMonth ? Math.round(balanceAtMonth(values, searchEndMonth)) : null },
+        needSimulation: { name: effectiveDemand.label, amount: effectiveDemand.amount, month: effectiveDemand.month, includedInMainCurve: effectiveDemand.enabled, balanceBefore: Math.round(needResult.beforeBalance), balanceAfter: Math.round(needResult.afterBalance), fundingGap: Math.max(0, Math.round(-needResult.afterBalance)), endingBalanceImpact: Math.round(needResult.endingImpact) },
         results: { endingBalanceBase: Math.round(projection.base), endingBalanceLow: Math.round(projection.low), endingBalanceHigh: Math.round(projection.high), totalNetCashContribution: Math.round(projection.invested), minimumBalance: Math.round(Math.min(...projection.points.map(p => p.base))) },
       }
       setAiStatus('Qwen3.5 正在分析现金流与风险…')
       stage = '本机 WebGPU 推理'
       const messages = [
-        { role: 'system', content: '你是面向大学生与初入职场青年的财务教育助手。只根据 JSON 输入中的现金流阶段、假设和结果提出建议。startingStage 是用户现在所处阶段，horizonStage 是未来测算终点，不能混淆。不要把期末余额说成当前余额；不要补造收入、支出、余额、日期或阈值。建议字段不得出现数字、金额或收益率，金额事实已由程序准确计算。讨论预算、求职过渡、流动性、风险承受和分散投资基础。不要提及或推荐保险、基金、股票、债券、证券、加密资产、黄金、期货或任何具体金融产品；不得建议买入卖出、借贷或承诺收益，不把假设收益说成预测。仅输出合法 JSON：{"cashflowAdvice":"现金流建议","investingEducation":"投资教育建议","riskNotes":"风险提示","actions":["行动一","行动二","行动三"]}。每个字段简短中文，每段一至两句；actions 最多三项。' },
+        { role: 'system', content: '你是面向大学生与初入职场青年的财务教育助手。只根据 JSON 输入中的现金流阶段、多情景比较、需求模拟和结果提出建议。startingStage 是用户现在所处阶段，horizonStage 是未来测算终点，不能混淆。不要把期末余额说成当前余额；不要补造收入、支出、余额、日期或阈值。建议字段不得出现数字、金额或收益率，金额事实已由程序准确计算。结合当前选中情景、情景差异与需求资金，讨论预算、求职过渡、流动性、风险承受和分散投资基础。不要提及或推荐保险、基金、股票、债券、证券、加密资产、黄金、期货或任何具体金融产品；不得建议买入卖出、借贷或承诺收益，不把假设收益说成预测。仅输出合法 JSON：{"cashflowAdvice":"现金流建议","investingEducation":"投资教育建议","riskNotes":"风险提示","actions":["行动一","行动二","行动三"]}。每个字段简短中文，每段一至两句；actions 最多三项。' },
         { role: 'user', content: JSON.stringify(facts) },
       ]
       const prompt = processor.apply_chat_template(messages, { add_generation_prompt: true, enable_thinking: false })
@@ -507,6 +591,10 @@ function App() {
         if (actions.length >= 3) break
         if (!actions.includes(action)) actions.push(action)
       }
+      if (revisionAtStart !== aiInputRevision.current) {
+        setAiStatus('分析期间模拟参数已变，旧报告已丢弃；请重新生成。')
+        return
+      }
       setAiReport({ summary: deterministicSummary, ...safeAdvice, actions, facts, model: 'Qwen3.5-0.8B（浏览器 WebGPU 本机推理）', createdAt: new Date().toLocaleString('zh-CN') })
       setAiStatus('已由本机 Qwen3.5 实际生成。数据未发送到模型服务商。')
     } catch (error) {
@@ -519,7 +607,9 @@ function App() {
 
   function downloadAiReport() {
     if (!aiReport) return
-    const content = ['# 千程智财 · 青年财富情景分析报告', '', `生成时间：${aiReport.createdAt}`, `实际生成模型：${aiReport.model}`, '', `终值情景：基准 ¥${formatMoney(aiReport.facts.results.endingBalanceBase)}；低位 ¥${formatMoney(aiReport.facts.results.endingBalanceLow)}；高位 ¥${formatMoney(aiReport.facts.results.endingBalanceHigh)}。`, '', '## 情景概述', aiReport.summary, '', '## 现金流建议', aiReport.cashflowAdvice, '', '## 投资教育建议', aiReport.investingEducation, '', '## 风险提示', aiReport.riskNotes, '', '## 可执行事项', ...aiReport.actions.map(item => `- ${item}`), '', '本报告由 AI 生成，仅供财务教育与情景讨论。模拟依赖用户输入，非收益预测或个性化证券投资建议。'].join('\n')
+    const need = aiReport.facts.needSimulation
+    const scenarioLines = aiReport.facts.scenarioComparison.map(item => `- ${item.name}：¥${formatMoney(item.endingBalance)}（相对当前规划 ${item.deltaFromCurrentPlan >= 0 ? '+' : '−'}¥${formatMoney(Math.abs(item.deltaFromCurrentPlan))}）`)
+    const content = ['# 千程智财 · 青年财富情景分析报告', '', `生成时间：${aiReport.createdAt}`, `实际生成模型：${aiReport.model}`, `选中情景：${aiReport.facts.selectedScenario.name}（${aiReport.facts.selectedScenario.adjustment}）`, '', '## 多情景期末对照', ...scenarioLines, '', `当前情景期末余额：¥${formatMoney(aiReport.facts.results.endingBalanceBase)}；收益假设敏感性区间：¥${formatMoney(aiReport.facts.results.endingBalanceLow)}—¥${formatMoney(aiReport.facts.results.endingBalanceHigh)}。`, `需求模拟：${need.name} ¥${formatMoney(need.amount)}，第 ${need.month} 个月；发生前 ¥${formatMoney(need.balanceBefore)}，支出后 ¥${formatMoney(need.balanceAfter)}，资金缺口 ¥${formatMoney(need.fundingGap)}；${need.includedInMainCurve ? '已计入主曲线' : '未计入主曲线'}。`, '', '## 情景概述', aiReport.summary, '', '## 现金流建议', aiReport.cashflowAdvice, '', '## 投资教育建议', aiReport.investingEducation, '', '## 风险提示', aiReport.riskNotes, '', '## 可执行事项', ...aiReport.actions.map(item => `- ${item}`), '', '本报告由 AI 生成，仅供财务教育与情景讨论。模拟依赖用户输入，非收益预测或个性化证券投资建议。'].join('\n')
     const link = document.createElement('a')
     link.href = URL.createObjectURL(new Blob([content], { type: 'text/markdown;charset=utf-8' }))
     link.download = '千程智财-青年财富AI分析报告.md'
@@ -527,8 +617,17 @@ function App() {
     URL.revokeObjectURL(link.href)
   }
 
+  function resetExample() {
+    aiInputRevision.current += 1
+    setValues(INITIAL)
+    setActiveScenarioId('base')
+    setDemand(INITIAL_NEED)
+    setAiReport(null)
+    setAiStatus(aiBusy ? '示例参数已恢复；当前分析完成后将丢弃旧结果。' : '尚未调用模型')
+  }
+
   async function copySummary() {
-    const text = `千程智财青年现金流情景\n起始资产：¥${formatMoney(values.principal)}\n在校月结余：¥${formatMoney(values.monthly)}\n毕业求职过渡：${values.searchMonths}个月\n毕业后税后月薪假设：¥${formatMoney(values.salary)}\n毕业后房租：¥${formatMoney(values.rent)}\n测算期限：${values.years}年\n收益率假设：${values.annualRate}%（非收益承诺）\n基准情景终值：约¥${formatMoney(projection.base)}\n敏感性对照：约¥${formatMoney(projection.low)}—¥${formatMoney(projection.high)}`
+    const text = `千程智财青年现金流情景\n选中情景：${activeScenario.label}（${activeScenario.adjustment}）\n起始资产：¥${formatMoney(effectiveValues.principal)}\n在校月结余：¥${formatMoney(effectiveValues.monthly)}\n毕业求职过渡：${effectiveValues.searchMonths}个月\n毕业后税后月薪假设：¥${formatMoney(effectiveValues.salary)}\n毕业后房租：¥${formatMoney(effectiveValues.rent)}\n测算期限：${effectiveValues.years}年\n收益率假设：${effectiveValues.annualRate}%（非收益承诺）\n期末余额：约¥${formatMoney(projection.base)}\n${effectiveDemand.label}：¥${formatMoney(effectiveDemand.amount)}，第${effectiveDemand.month}个月；支出后约¥${formatMoney(needResult.afterBalance)}；${effectiveDemand.enabled ? '计入主曲线' : '未计入主曲线'}\n敏感性对照：约¥${formatMoney(projection.low)}—¥${formatMoney(projection.high)}`
     try {
       await navigator.clipboard.writeText(text)
       setCopied(true)
@@ -585,7 +684,7 @@ function App() {
       </header>
 
       <main className="relative mx-auto max-w-[1700px] px-5 pb-14 pt-5 sm:px-8 sm:pt-8 lg:px-12">
-        <WealthHero projection={projection} values={values} reducedMotion={reducedMotion} />
+        <WealthHero projection={projection} values={effectiveValues} scenarioLabel={activeScenario.label} demand={effectiveDemand} reducedMotion={reducedMotion} />
         <section id="curve" ref={chartRef} className="scroll-mt-8">
           <div className="grid items-end gap-4 min-[560px]:grid-cols-[minmax(0,1fr)_auto]">
             <motion.div
@@ -612,7 +711,7 @@ function App() {
               transition={{ duration: reducedMotion ? 0 : 0.48, delay: reducedMotion ? 0 : 0.06, ease: [0.16, 1, 0.3, 1] }}
             >
               <div>
-                <div className="mb-1 text-[11px] text-muted">{values.years} 年后 · 基准终值</div>
+                <div className="mb-1 text-[11px] text-muted">{values.years} 年后 · {activeScenario.label}期末</div>
                 <div className="font-display text-3xl font-medium tracking-[-.05em] text-copy sm:text-4xl" aria-live="polite" aria-atomic="true">
                   <span className="mr-1 align-top font-sans text-xs font-normal tracking-normal text-muted">¥</span>
                   <AnimatePresence mode="wait" initial={false}>
@@ -651,7 +750,11 @@ function App() {
               <span className="inline-flex items-center gap-1.5 text-[11px] text-faint"><CircleHelp size={12} />收益率 ±2.5 个百分点 · 非概率区间</span>
             </div>
 
-            <AssetChart projection={projection} years={values.years} reducedMotion={reducedMotion} milestones={milestones} animationKey={chartRevision} />
+            <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-[11px] text-muted">
+              <span className="inline-flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#e8b68f]" />一次性支出节点</span>
+              <span>{activeScenario.label} · {activeScenario.adjustment}</span>
+            </div>
+            <AssetChart projection={projection} years={values.years} reducedMotion={reducedMotion} milestones={milestones} animationKey={chartRevision} demand={effectiveDemand} />
           </motion.div>
 
           <div className="relative mt-5">
@@ -687,7 +790,7 @@ function App() {
 
           <div className="mt-7 grid gap-5 border-t border-white/[0.08] pt-4 sm:grid-cols-3 sm:gap-8">
             <div>
-              <div className="text-[11px] text-muted">期末净现金投入</div>
+              <div className="text-[11px] text-muted">累计净现金流</div>
               <div className="mt-1.5 font-mono text-base tabular-nums text-copy">¥{formatCompact(projection.invested)}</div>
             </div>
             <div className="sm:border-l sm:border-white/[0.09] sm:pl-6">
@@ -736,23 +839,6 @@ function App() {
                 <NumericField label="毕业后生活费" suffix="月均其他支出" value={values.living} min={0} max={1000000} step={100} onChange={(value) => update('living', value)} />
               </div>
 
-              <div className="mt-5 border-t border-white/10 pt-5">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div><div className="text-sm text-copy">AI 青年财富分析</div><div className="mt-1 text-xs leading-5 text-muted">本机 Qwen3.5 · 首次使用下载开源模型 · 支持 WebGPU 浏览器</div></div>
-                  <button type="button" onClick={generateAiReport} disabled={aiBusy} className="rounded-full bg-cyan px-5 py-3 text-sm font-medium text-[#071216] transition-colors hover:bg-[#a9f1e9] disabled:cursor-wait disabled:opacity-60">{aiBusy ? '分析中…' : aiReport ? '重新生成报告' : '生成财务分析'}</button>
-                </div>
-                <p role="status" aria-live="polite" className="mt-3 text-xs leading-5 text-muted">{aiStatus}</p>
-                {aiReport && <div className="mt-4 space-y-4 border-l border-cyan/40 pl-4 text-sm leading-6 text-[#d7e8e8]">
-                  <div><h3 className="font-medium text-cyan">情景观察</h3><p>{aiReport.summary}</p></div>
-                  <div><h3 className="font-medium text-cyan">现金流建议</h3><p>{aiReport.cashflowAdvice}</p></div>
-                  <div><h3 className="font-medium text-cyan">投资教育</h3><p>{aiReport.investingEducation}</p></div>
-                  <div><h3 className="font-medium text-cyan">风险提醒</h3><p>{aiReport.riskNotes}</p></div>
-                  <ol className="list-inside list-decimal">{aiReport.actions.slice(0, 3).map((item, index) => <li key={index}>{item}</li>)}</ol>
-                  <p className="text-[11px] text-faint">{aiReport.model} · {aiReport.createdAt} · 学习与情景讨论用途</p>
-                  <button type="button" onClick={downloadAiReport} className="border-b border-white/30 pb-1 text-xs text-copy hover:border-cyan hover:text-cyan">下载分析报告（Markdown）</button>
-                </div>}
-              </div>
-
               <div className="mt-3 rounded-xl border border-white/[0.075] bg-white/[0.025] px-4 py-3.5">
                 <div className="flex items-center justify-between">
                   <label htmlFor="rate" className="text-xs text-muted">年化收益假设</label>
@@ -788,6 +874,44 @@ function App() {
                 ))}
                 <span className="ml-auto text-[11px] text-faint">测算期限</span>
               </div>
+            </div>
+          </div>
+
+              <ScenarioLab
+                scenarios={scenarioRows}
+                activeScenarioId={activeScenarioId}
+                onSelectScenario={selectScenario}
+                demand={effectiveDemand}
+                presets={NEED_PRESETS}
+                horizonMonths={effectiveValues.years * MONTHS_PER_YEAR}
+                needResult={needResult}
+                onPresetChange={presetId => {
+                  const preset = NEED_PRESETS.find(item => item.id === presetId) ?? NEED_PRESETS[0]
+                  updateDemand({ preset: preset.id, label: preset.id === 'custom' ? '我的目标' : preset.label, amount: preset.amount })
+                }}
+                onDemandNameChange={label => updateDemand({ label })}
+                onDemandAmountChange={amount => updateDemand({ amount: Math.min(500000, Math.max(0, amount)) })}
+                onDemandMonthChange={month => updateDemand({ month })}
+                onToggleDemand={() => updateDemand({ enabled: !effectiveDemand.enabled })}
+                reducedMotion={reducedMotion}
+              />
+
+              <div className="mt-8 max-w-[1200px] border-t border-white/10 pt-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div><div className="text-sm text-copy">AI 青年财富分析</div><div className="mt-1 text-xs leading-5 text-muted">本机 Qwen3.5 · 报告包含所选情景、需求资金和现金流事实</div></div>
+                  <button type="button" onClick={generateAiReport} disabled={aiBusy} className="rounded-full bg-cyan px-5 py-3 text-sm font-medium text-[#071216] transition-colors hover:bg-[#a9f1e9] disabled:cursor-wait disabled:opacity-60">{aiBusy ? '分析中…' : aiReport ? '重新生成报告' : '生成财务分析'}</button>
+                </div>
+                <p role="status" aria-live="polite" className="mt-3 text-xs leading-5 text-muted">{aiStatus}</p>
+                {aiReport && <div className="mt-4 space-y-4 border-l border-cyan/40 pl-4 text-sm leading-6 text-[#d7e8e8]">
+                  <div><h3 className="font-medium text-cyan">情景观察</h3><p>{aiReport.summary}</p></div>
+                  <div><h3 className="font-medium text-cyan">现金流建议</h3><p>{aiReport.cashflowAdvice}</p></div>
+                  <div><h3 className="font-medium text-cyan">投资教育</h3><p>{aiReport.investingEducation}</p></div>
+                  <div><h3 className="font-medium text-cyan">风险提醒</h3><p>{aiReport.riskNotes}</p></div>
+                  <ol className="list-inside list-decimal">{aiReport.actions.slice(0, 3).map((item, index) => <li key={index}>{item}</li>)}</ol>
+                  <p className="text-[11px] text-faint">{aiReport.model} · {aiReport.createdAt} · 学习与情景讨论用途</p>
+                  <button type="button" onClick={downloadAiReport} className="border-b border-white/30 pb-1 text-xs text-copy hover:border-cyan hover:text-cyan">下载分析报告（Markdown）</button>
+                </div>}
+              </div>
 
               <div className="mt-6 flex flex-wrap items-center gap-4">
                 <motion.button
@@ -799,12 +923,10 @@ function App() {
                 >
                   回到曲线看变化 <ArrowUpRight size={15} className="transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
                 </motion.button>
-                <button type="button" onClick={() => setValues(INITIAL)} className="inline-flex items-center gap-2 py-2 text-xs text-muted transition-colors hover:text-copy">
+                <button type="button" onClick={resetExample} className="inline-flex items-center gap-2 py-2 text-xs text-muted transition-colors hover:text-copy">
                   <RotateCcw size={13} /> 恢复示例
                 </button>
               </div>
-            </div>
-          </div>
         </section>
 
         <div className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.07] py-4 text-[10px] text-faint">
@@ -823,7 +945,7 @@ function App() {
           <div className="grid gap-7 sm:grid-cols-3 sm:gap-8">
             <div className="border-t border-white/15 pt-4">
               <span className="font-mono text-[11px] text-cyan">复利计算</span>
-              <p className="mt-3 text-sm leading-6 text-copy">每月先按假设收益率折算余额，再计入在校结余、求职期净支出或入职后净结余；月度假设持续滚入下一期。</p>
+            <p className="mt-3 text-sm leading-6 text-copy">每月按假设收益率折算非负余额，再计入在校结余、求职期净支出或入职后净结余。需求模拟可额外加入一次性支出；负余额作为未覆盖缺口，不计收益。</p>
             </div>
             <div className="border-t border-white/15 pt-4">
               <span className="font-mono text-[11px] text-cyan">区间对照</span>

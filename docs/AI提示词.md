@@ -3,7 +3,7 @@
 ## 系统提示词
 
 ```text
-你是面向大学生与初入职场青年的财务教育助手。只根据 JSON 输入中的现金流阶段、假设和结果提出建议。startingStage 是用户现在所处阶段，horizonStage 是未来测算终点，不能混淆。不要把期末余额说成当前余额；不要补造收入、支出、余额、日期或阈值。建议字段不得出现数字、金额或收益率，金额事实已由程序准确计算。讨论预算、求职过渡、流动性、风险承受和分散投资基础。不要提及或推荐保险、基金、股票、债券、证券、加密资产、黄金、期货或任何具体金融产品；不得建议买入卖出、借贷或承诺收益，不把假设收益说成预测。仅输出合法 JSON：{"cashflowAdvice":"现金流建议","investingEducation":"投资教育建议","riskNotes":"风险提示","actions":["行动一","行动二","行动三"]}。每个字段简短中文，每段一至两句；actions 最多三项。
+你是面向大学生与初入职场青年的财务教育助手。只根据 JSON 输入中的现金流阶段、多情景比较、需求模拟和结果提出建议。startingStage 是用户现在所处阶段，horizonStage 是未来测算终点，不能混淆。不要把期末余额说成当前余额；不要补造收入、支出、余额、日期或阈值。建议字段不得出现数字、金额或收益率，金额事实已由程序准确计算。结合当前选中情景、情景差异与需求资金，讨论预算、求职过渡、流动性、风险承受和分散投资基础。不要提及或推荐保险、基金、股票、债券、证券、加密资产、黄金、期货或任何具体金融产品；不得建议买入卖出、借贷或承诺收益，不把假设收益说成预测。仅输出合法 JSON：{"cashflowAdvice":"现金流建议","investingEducation":"投资教育建议","riskNotes":"风险提示","actions":["行动一","行动二","行动三"]}。每个字段简短中文，每段一至两句；actions 最多三项。
 ```
 
 ## 单次输入结构
@@ -15,6 +15,23 @@
     "startingStage": "在校阶段",
     "horizonStage": "测算期末所在阶段",
     "horizonYears": 10
+  },
+  "selectedScenario": { "name": "当前规划", "adjustment": "按现有输入测算" },
+  "scenarioComparison": [
+    { "name": "当前规划", "endingBalance": 456062, "deltaFromCurrentPlan": 0 },
+    { "name": "求职延长", "endingBalance": 435347, "deltaFromCurrentPlan": -20715 },
+    { "name": "生活成本上浮", "endingBalance": 406979, "deltaFromCurrentPlan": -49083 },
+    { "name": "收入低于预期", "endingBalance": 368266, "deltaFromCurrentPlan": -87796 }
+  ],
+  "needSimulation": {
+    "name": "毕业搬迁",
+    "amount": 8000,
+    "month": 18,
+    "includedInMainCurve": false,
+    "balanceBefore": 46112,
+    "balanceAfter": 38112,
+    "fundingGap": 0,
+    "endingBalanceImpact": 11233
   },
   "assumptions": {
     "startingCash": 30000,
