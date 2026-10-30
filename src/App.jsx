@@ -18,6 +18,7 @@ const INITIAL = { principal: 30000, monthly: 770, years: 10, annualRate: 4, scho
 const YEAR_OPTIONS = [5, 10, 15, 20]
 const MONTHS_PER_YEAR = 12
 const HF_RANGE_BYTES = 8 * 1024 * 1024
+const HF_RANGE_IDLE_TIMEOUT_MS = 60_000
 let qwenRuntimePromise
 
 function installHuggingFaceRangeFetch() {
@@ -57,11 +58,18 @@ function installHuggingFaceRangeFetch() {
       const headers = new Headers(requestHeaders)
       headers.set('Range', `bytes=${segmentStart}-${segmentEnd}`)
       let part
+      const timeoutController = new AbortController()
+      const timeoutId = setTimeout(() => timeoutController.abort(new Error('模型分段请求超时')), HF_RANGE_IDLE_TIMEOUT_MS)
       try {
-        part = await nativeFetch(url, { ...baseInit, method: 'GET', headers })
+        const signal = baseInit.signal
+          ? AbortSignal.any([baseInit.signal, timeoutController.signal])
+          : timeoutController.signal
+        part = await nativeFetch(url, { ...baseInit, method: 'GET', headers, signal })
       } catch (error) {
         console.warn(`[Qwen3.5] Range ${segmentStart}-${segmentEnd} failed`, error)
         throw error
+      } finally {
+        clearTimeout(timeoutId)
       }
       console.info(`[Qwen3.5] Range ${segmentStart}-${segmentEnd}: HTTP ${part.status}`)
       if (part.status !== 206 || !part.body) {
@@ -82,7 +90,19 @@ function installHuggingFaceRangeFetch() {
             }
             await openSegment()
           }
-          const { value, done } = await reader.read()
+          let readTimeoutId
+          let chunk
+          try {
+            chunk = await Promise.race([
+              reader.read(),
+              new Promise((_, reject) => {
+                readTimeoutId = setTimeout(() => reject(new Error('模型分段读取超时')), HF_RANGE_IDLE_TIMEOUT_MS)
+              }),
+            ])
+          } finally {
+            clearTimeout(readTimeoutId)
+          }
+          const { value, done } = chunk
           if (!done) {
             segmentBytes += value.byteLength
             controller.enqueue(value)
