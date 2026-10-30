@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Noto Sans SC", "Manrope", system-ui, sans-serif;
+  --font-display: "Manrope", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, monospace;
+  --color-ink: #080d13;
+  --color-panel: #0d151d;
+  --color-panel-raised: #121d27;
+  --color-line: #26333d;
+  --color-copy: #eef4f6;
+  --color-muted: #94a3ad;
+  --color-faint: #61717c;
+  --color-cyan: #7ce4e4;
+  --color-blue: #84b8ff;
+  --color-gold: #e9c27b;
+}
+
+@keyframes orbit-drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(4%, -3%, 0) scale(1.08); }
+}
+
+@keyframes slow-shift {
+  0%, 100% { transform: translateX(-1.5%); opacity: .25; }
+  50% { transform: translateX(1.5%); opacity: .55; }
+}
+
+@layer base {
+  :root { color-scheme: dark; font-synthesis: none; text-rendering: optimizeLegibility; }
+  html { scroll-behavior: smooth; background: #080d13; }
+  body { margin: 0; min-width: 320px; background: #080d13; color: #eef4f6; font-family: var(--font-sans); }
+  button, input { font: inherit; }
+  button { -webkit-tap-highlight-color: transparent; }
+  ::selection { background: rgba(124, 228, 228, .25); color: #fff; }
+  :focus-visible { outline: 2px solid #7ce4e4; outline-offset: 3px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
